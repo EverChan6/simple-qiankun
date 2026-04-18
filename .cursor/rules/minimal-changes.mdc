@@ -1,0 +1,32 @@
+---
+description: Enforce minimal, request-scoped code changes
+alwaysApply: true
+---
+
+# Minimal Changes First
+
+- Only implement what the user explicitly requested.
+- Do not broaden scope unless the user asks.
+- Do not refactor unrelated files "while here."
+- Do not rename/move files unless required for the requested task.
+- Prefer surgical edits over large rewrites.
+
+# Allowed Expansion
+
+- Expand scope only when needed to fix a directly related compile/test/runtime break.
+- If expansion affects unrelated modules, ask for confirmation first.
+
+# Safe Editing Pattern
+
+- Read before editing.
+- Modify the smallest viable set of files.
+- Keep public APIs stable unless the request requires breaking changes.
+- If extra improvements are found, list them as optional follow-ups instead of applying directly.
+
+# Example
+
+```text
+Request: "Fix subapp route registration bug"
+Do: update subapp registration logic and adjacent type definitions if needed.
+Don't: reformat whole project, migrate router architecture, or rename unrelated files.
+```
