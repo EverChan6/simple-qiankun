@@ -10,7 +10,7 @@ const router = createRouter({
     {
       path: '/subapp/:pathMatch(.*)*',
       name: 'subapp',
-      component: () => import('@/components/LayoutMain.vue'),
+      component: () => import('@/views/Home.vue'),
     },
   ],
 })
