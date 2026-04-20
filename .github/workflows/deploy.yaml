@@ -1,0 +1,52 @@
+name: Deploy Vue to GitHub Pages
+
+on:
+  push:
+    branches: ['main'] # 主分支推送时触发
+  workflow_dispatch: # 允许手动触发
+
+# 设置权限（新版 Pages 部署必须）
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 并发控制
+concurrency:
+  group: 'pages'
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }} # 输出部署后的 URL
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist # Vue 默认打包目录
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
