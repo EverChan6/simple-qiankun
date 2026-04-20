@@ -29,6 +29,7 @@ coverage
 .eslintcache
 .history
 .vscode
+.env
 
 # Cypress
 /cypress/videos/

@@ -40,6 +40,7 @@
   width: 100%;
   top: 0;
   z-index: 1000;
+  box-sizing: border-box;
 }
 
 .logo {
