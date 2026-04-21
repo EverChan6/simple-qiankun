@@ -1,84 +1,129 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, watch, shallowRef } from 'vue'
+import { useChatStore } from '@/stores/chat'
+import MarkdownIt from 'markdown-it'
+import DOMPurify from 'dompurify'
 
-// TODO: 完善AI助手的功能 
-// 1. 会话历史列表
-// 2. 新增会话
-// 3. 流式输出
-// 4. 返回富文本处理（比如加粗、代码块等）
-// 5. 打开对话框自动滚动到最新消息
-
-// TODO：
-// 1. 目前api key等是写在.env文件里，并且gitignore了，那上线时如何获取
-// 2. 如何部署后端
-
-type Msg = { role: 'user' | 'assistant' | 'system'; content: string }
-
+const store = useChatStore()
 const open = ref(false)
-const loading = ref(false)
 const input = ref('')
-const messages = reactive<Msg[]>([
-  { role: 'system', content: '你是一个有帮助的 AI 助手。请用简体中文回答。' }
-])
-const sessionId = ref<string | null>(null)
-const visibleMessages = computed(() => messages.filter(m => m.role !== 'system'))
+const md = new MarkdownIt({ html: false, linkify: true, typographer: true })
+const bodyRef = ref<HTMLElement | null>(null)
+const streamingMessageId = ref<string | null>(null)
+const showHistory = ref(false)
+let updateTimer: number | null = null
+let lastUpdateTime = 0
 
 function toggle() {
   open.value = !open.value
+  if (open.value) scrollToBottom()
+}
+
+function createSession() {
+  store.createSession()
+  nextTick(() => scrollToBottom())
+}
+
+function selectSession(id: string) {
+  store.selectSession(id)
+  // load history from server if not present
+  const s = store.sessions[id]
+  if (!s || !s.messages || s.messages.length === 0) {
+    store.loadHistory(id)
+  }
+  // 关闭历史侧边栏
+  showHistory.value = false
+  // 滚动到底部
+  nextTick(() => scrollToBottom())
 }
 
 async function send() {
   const text = input.value.trim()
   if (!text) return
-  messages.push({ role: 'user', content: text })
   input.value = ''
-  loading.value = true
-
-  try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: sessionId.value, message: text })
-    })
-
-    if (!resp.ok) {
-      const txt = await resp.text()
-      messages.push({ role: 'assistant', content: `调用后端AI代理失败：${resp.status} ${txt}` })
-      loading.value = false
-      return
-    }
-
-    const data = await resp.json()
-    if (data.sessionId) {
-      sessionId.value = data.sessionId
-      try { localStorage.setItem('ai_session_id', sessionId.value) } catch {}
-    }
-    const reply = data.assistant || 'AI 未返回结果。'
-    messages.push({ role: 'assistant', content: reply })
-  } catch (e: any) {
-    messages.push({ role: 'assistant', content: '请求出错：' + (e?.message || String(e)) })
-  } finally {
-    loading.value = false
-  }
+  await store.sendMessage(text)
 }
 
-onMounted(async () => {
-  try {
-    const sid = localStorage.getItem('ai_session_id')
-    if (sid) {
-      sessionId.value = sid
-      const resp = await fetch(`/api/history?sessionId=${encodeURIComponent(sid)}`)
-      if (resp.ok) {
-        const data = await resp.json()
-        if (Array.isArray(data.messages)) {
-          // replace messages with server history while keeping initial system prompt
-          messages.splice(0, messages.length, ...(data.messages.length ? data.messages : messages))
+const visibleMessages = computed(() => {
+  const cur = store.getCurrentSession()
+  if (!cur) return [] as any[]
+  return cur.messages.filter((m: any) => m.role !== 'system')
+})
+
+const sessionList = computed(() => {
+  return Object.values(store.sessions).sort((a, b) => {
+    const lastMsgA = a.messages[a.messages.length - 1]?.createdAt || 0
+    const lastMsgB = b.messages[b.messages.length - 1]?.createdAt || 0
+    return lastMsgA - lastMsgB
+  })
+})
+
+const isStreaming = (msg: any) => {
+  return store.streaming && msg.id === streamingMessageId.value
+}
+
+function renderMarkdown(src: string) {
+  if (!src) return ''
+  const html = md.render(src || '')
+  return DOMPurify.sanitize(html)
+}
+
+function scrollToBottom() {
+  nextTick(() => {
+    try {
+      const el = bodyRef.value
+      if (el) {
+        el.scrollTop = el.scrollHeight
+      }
+    } catch (e) {
+      // ignore
+    }
+  })
+}
+
+// auto-scroll when messages change (throttled)
+watch(
+  () => visibleMessages.value.map((m: any) => m.content).join('\n'),
+  () => {
+    const now = Date.now()
+    const timeSinceLastUpdate = now - lastUpdateTime
+    
+    if (timeSinceLastUpdate > 100) {
+      lastUpdateTime = now
+      requestAnimationFrame(() => {
+        setTimeout(scrollToBottom, 16)
+      })
+    } else {
+      if (updateTimer) {
+        clearTimeout(updateTimer)
+      }
+      updateTimer = window.setTimeout(() => {
+        lastUpdateTime = Date.now()
+        scrollToBottom()
+      }, 100 - timeSinceLastUpdate)
+    }
+  }
+)
+
+watch(
+  () => store.streaming,
+  (isStreaming) => {
+    if (isStreaming) {
+      const cur = store.getCurrentSession()
+      if (cur && cur.messages.length > 0) {
+        const lastMsg = cur.messages[cur.messages.length - 1]
+        if (lastMsg.role === 'assistant') {
+          streamingMessageId.value = lastMsg.id
         }
       }
+    } else {
+      streamingMessageId.value = null
     }
-  } catch (e) {
-    // ignore
   }
+)
+
+onMounted(() => {
+  if (store.currentSessionId) store.loadHistory(String(store.currentSessionId))
 })
 </script>
 
@@ -91,28 +136,65 @@ onMounted(async () => {
     </div>
 
     <div class="ai-panel" v-if="open">
-      <div class="ai-header">
-        <span>跟我对话吧～</span>
-        <button class="close" @click="toggle">×</button>
-      </div>
-
-      <div class="ai-body">
-        <div v-for="(m, idx) in visibleMessages" :key="idx" :class="['msg', m.role]">
-          <div class="content">{{ m.content }}</div>
+      <!-- 历史侧边栏 -->
+      <div class="ai-history-sidebar" :class="{ 'show': showHistory }">
+        <div class="history-header">
+          <button class="toggle-btn" @click="showHistory = false" aria-label="收起历史侧边栏">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+        </div>
+        <div class="history-list">
+          <div
+            v-for="session in sessionList"
+            :key="session.id"
+            :class="['history-item', { 'active': session.id === store.currentSessionId }]"
+            @click="selectSession(session.id)"
+          >
+            <div class="session-name">{{ session.name || `Session ${session.id.slice(-6)}` }}</div>
+            <div class="session-preview">
+              {{ session.messages[session.messages.length - 1]?.content?.slice(0, 30) || '新会话' }}...
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="ai-footer">
-        <input v-model="input" @keyup.enter="send" placeholder="请输入消息，回车发送" />
-        <button class="send-btn" @click="send" :disabled="loading" aria-label="发送消息">
-          <svg v-if="!loading" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M22 2L11 13" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <svg v-else class="spinner" width="18" height="18" viewBox="0 0 50 50">
-            <circle cx="25" cy="25" r="20" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-dasharray="31.4 31.4"/>
-          </svg>
-        </button>
+      <div class="ai-content" :class="{ 'with-history': showHistory }">
+        <div class="ai-header">
+          <span>跟我对话吧～</span>
+          <div style="display: flex; align-items: center;">
+            <button class="close" @click="showHistory = !showHistory" aria-label="历史会话">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <button class="close" @click="createSession">+</button>
+            <button class="close" @click="toggle">×</button>
+          </div>
+        </div>
+
+        <div class="ai-body" ref="bodyRef">
+          <div v-for="(m, idx) in visibleMessages" :key="m.id || idx" :class="['msg', m.role]">
+            <div class="content">
+              <div v-html="renderMarkdown(m.content)" :class="{ 'streaming': isStreaming(m) }"></div>
+              <span v-if="isStreaming(m)" class="cursor">|</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="ai-footer">
+          <input v-model="input" @keyup.enter="send" placeholder="请输入消息，回车发送" />
+          <button class="send-btn" @click="send" :disabled="store.loading" aria-label="发送消息">
+            <svg v-if="!store.loading" width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M22 2L11 13" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <svg v-else class="spinner" width="18" height="18" viewBox="0 0 50 50">
+              <circle cx="25" cy="25" r="20" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-dasharray="31.4 31.4"/>
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -147,9 +229,95 @@ onMounted(async () => {
   border-radius: 12px;
   box-shadow: 0 8px 30px rgba(0,0,0,0.15);
   display: flex;
-  flex-direction: column;
   overflow: hidden;
   z-index: 10000;
+}
+
+.ai-history-sidebar {
+  width: 0;
+  background: #f8f9fa;
+  transition: width 0.3s ease;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ai-history-sidebar.show {
+  width: 80px;
+  border-right: 1px solid #e9ecef;
+}
+
+.history-header {
+  padding: 12px 16px;
+  background: #e9ecef;
+  color: #495057;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.history-header .toggle-btn {
+  background: transparent;
+  border: 0;
+  color: #495057;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  transition: background-color 0.2s;
+  cursor: pointer;
+}
+
+.history-header .toggle-btn:hover {
+  background-color: #dee2e6;
+}
+
+.history-list {
+  height: calc(100% - 49px);
+  overflow-y: auto;
+}
+
+.history-item {
+  padding: 12px 16px;
+  border-bottom: 1px solid #e9ecef;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.history-item:hover {
+  background-color: #e9ecef;
+}
+
+.history-item.active {
+  background-color: #007bff;
+  color: white;
+}
+
+.session-name {
+  font-weight: 600;
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
+.session-preview {
+  font-size: 12px;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.3s ease;
+}
+
+.ai-content.with-history {
+  width: calc(360px - 280px);
 }
 .ai-header{
   padding: 12px 16px;
@@ -159,15 +327,67 @@ onMounted(async () => {
   align-items:center;
   justify-content:space-between;
 }
-.ai-header .close{background:transparent;border:0;color:#fff;font-size:18px;cursor:pointer}
-.ai-body{padding:12px;overflow:auto;flex:1;background:#f7f8fb}
+.ai-header .close{
+  background:transparent;
+  border:0;
+  color:#fff;
+  font-size:18px;
+  cursor:pointer;
+  margin-left:8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+}
+.ai-body{padding:12px;overflow:auto;flex:1;background:#f7f8fb; min-height: 360px;}
 .msg{margin-bottom:8px;display:flex}
 .msg.system{display:none}
 .msg.user{justify-content:flex-end}
 .msg.assistant{justify-content:flex-start}
-.msg .content{max-width:85%;display:inline-block;padding:8px;border-radius:8px}
+.msg .content{max-width:85%;display:inline-block;padding:8px;border-radius:8px;position:relative}
 .msg.user .content{background:#d1e7ff;color:#0b2b47}
 .msg.assistant .content{background:#fff;border:1px solid #e6eef8;color:#0b2b47}
+.msg.assistant .content.streaming{animation:content-pulse 0.5s ease-in-out infinite alternate}
+
+/* 修复li标签marker超出容器的问题 */
+.msg .content :deep(ul),
+.msg .content :deep(ol) {
+  margin: 0;
+  padding-left: 1.5em;
+  overflow: hidden;
+}
+
+.msg .content :deep(li) {
+  margin: 0.25em 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.msg .content :deep(ul li) {
+  list-style-type: disc;
+}
+
+.msg .content :deep(ol li) {
+  list-style-type: decimal;
+}
+
+/* 确保列表标记在容器内 */
+.msg .content :deep(ul),
+.msg .content :deep(ol) {
+  list-style-position: inside;
+}
+
+/* 为长内容添加滚动支持 */
+.msg .content :deep(pre) {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+@keyframes content-pulse{from{opacity:0.95}to{opacity:1}}
+.cursor{display:inline-block;width:2px;height:1.2em;background:#667eea;margin-left:2px;animation:blink 0.8s step-end infinite;vertical-align:text-bottom}
+@keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
 .ai-footer{display:flex;padding:8px;border-top:1px solid #eee;align-items:center}
 .ai-footer input{flex:1;padding:10px 12px;border-radius:14px;border:1px solid #ddd;margin-right:8px}
 .send-btn{width:40px;height:40px;border-radius:50%;border:0;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;align-items:center;justify-content:center;color:#fff;cursor:pointer}

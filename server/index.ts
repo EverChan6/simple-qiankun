@@ -30,8 +30,8 @@ async function handleChat(body: any) {
   if (!apiKey) {
     return new Response(JSON.stringify({ error: 'Server missing OPENAI_API_KEY' }), { status: 500 })
   }
-
-  const { sessionId: maybeId, message } = body || {}
+  const { sessionId: maybeId, message, input } = body || {}
+  const userMessage = input ?? message
   const sessionId = maybeId || uuid()
 
   const all = loadAll()
@@ -39,11 +39,11 @@ async function handleChat(body: any) {
     all[sessionId] = [{ role: 'system', content: '你是一个有帮助的 AI 助手。请用简体中文回答。' }]
   }
 
-  if (message && message.trim()) {
-    all[sessionId].push({ role: 'user', content: message })
+  if (userMessage && userMessage.trim()) {
+    all[sessionId].push({ role: 'user', content: userMessage })
   }
 
-  // call OpenAI
+  // Streaming path: proxy OpenAI stream to client while accumulating assistant text
   try {
     const resp = await fetch(`${process.env.VITE_OPENAI_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -54,26 +54,83 @@ async function handleChat(body: any) {
       body: JSON.stringify({
         model: process.env.VITE_OPENAI_MODEL,
         messages: all[sessionId],
-        max_tokens: 800,
+        // max_tokens: 65536,
+        stream: true,
       }),
     })
 
-    if (!resp.ok) {
+    if (!resp.ok || !resp.body) {
       const text = await resp.text()
       return new Response(JSON.stringify({ error: text }), { status: resp.status })
     }
 
-    const data = await resp.json()
-    const reply = data?.choices?.[0]?.message?.content || ''
-    all[sessionId].push({ role: 'assistant', content: reply })
-    saveAll(all)
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let assistantAccum = ''
+    let buffer = ''
 
-    return new Response(JSON.stringify({ sessionId, assistant: reply }), {
-      headers: { 'Content-Type': 'application/json' },
+    const streamToClient = new ReadableStream({
+      async start(controller) {
+        try {
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            if (value) {
+              const chunk = decoder.decode(value)
+              // forward raw chunk to client
+              controller.enqueue(new TextEncoder().encode(chunk))
+
+              // accumulate and parse complete `data: ...\n\n` SSE messages
+              buffer += chunk
+              let match
+              const regex = /data:\s*(.*?)\r?\n\r?\n/gs
+              while ((match = regex.exec(buffer)) !== null) {
+                const payload = match[1]
+                if (!payload) continue
+                if (payload === '[DONE]') continue
+                try {
+                  const parsed = JSON.parse(payload)
+                  const delta = parsed?.choices?.[0]?.delta?.content
+                  if (delta) assistantAccum += delta
+                } catch (e) {
+                  // ignore parse errors for partial/non-json lines
+                }
+              }
+
+              // keep only the tail part after last double newline (possible partial)
+              const lastSep = buffer.lastIndexOf('\n\n')
+              if (lastSep >= 0) {
+                buffer = buffer.slice(lastSep + 2)
+              } else if (buffer.length > 1_000_000) {
+                // prevent unbounded buffer growth
+                buffer = buffer.slice(-1000)
+              }
+            }
+          }
+        } catch (e) {
+          controller.error(e)
+        } finally {
+          // persist assistant message after stream ends
+          if (assistantAccum) {
+            all[sessionId].push({ role: 'assistant', content: assistantAccum })
+            saveAll(all)
+          }
+          controller.close()
+        }
+      },
+    })
+
+    return new Response(streamToClient, {
+      headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
     })
   } catch (e: any) {
     return new Response(JSON.stringify({ error: e?.message || String(e) }), { status: 500 })
   }
+
+  // If not stream, return an error — server only supports streaming mode
+  return new Response(JSON.stringify({ error: 'Server only supports stream=true' }), {
+    status: 400,
+  })
 }
 
 async function handleHistory(sessionId: string | undefined) {
