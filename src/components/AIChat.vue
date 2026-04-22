@@ -20,6 +20,13 @@ function toggle() {
 }
 
 function createSession() {
+  const currentSession = store.getCurrentSession()
+  // 如果当前会话存在且没有消息，则直接使用当前会话
+  if (currentSession && currentSession.messages.length === 0) {
+    // 当前会话为空，不需要创建新会话
+    return
+  }
+  // 当前会话有内容，创建新会话
   store.createSession()
   nextTick(() => scrollToBottom())
 }
@@ -348,7 +355,7 @@ onMounted(() => {
 .msg .content{max-width:85%;display:inline-block;padding:8px;border-radius:8px;position:relative}
 .msg.user .content{background:#d1e7ff;color:#0b2b47}
 .msg.assistant .content{background:#fff;border:1px solid #e6eef8;color:#0b2b47}
-.msg.assistant .content.streaming{animation:content-pulse 0.5s ease-in-out infinite alternate}
+.msg.assistant .content.streaming{animation:content-pulse 1s ease-in-out infinite alternate}
 
 /* 修复li标签marker超出容器的问题 */
 .msg .content :deep(ul),
@@ -386,12 +393,12 @@ onMounted(() => {
   word-wrap: break-word;
 }
 @keyframes content-pulse{from{opacity:0.95}to{opacity:1}}
-.cursor{display:inline-block;width:2px;height:1.2em;background:#667eea;margin-left:2px;animation:blink 0.8s step-end infinite;vertical-align:text-bottom}
+.cursor{display:inline-block;width:2px;height:1.2em;border-radius:1px;margin-left:2px;animation:blink 1.2s step-end infinite;vertical-align:text-bottom;}
 @keyframes blink{0%,50%{opacity:1}51%,100%{opacity:0}}
 .ai-footer{display:flex;padding:8px;border-top:1px solid #eee;align-items:center}
 .ai-footer input{flex:1;padding:10px 12px;border-radius:14px;border:1px solid #ddd;margin-right:8px}
 .send-btn{width:40px;height:40px;border-radius:50%;border:0;background:linear-gradient(135deg,#667eea,#764ba2);display:flex;align-items:center;justify-content:center;color:#fff;cursor:pointer}
 .send-btn:disabled{opacity:0.6;cursor:not-allowed}
-.spinner{animation:spin 1s linear infinite}
+.spinner{animation:spin 1.5s linear infinite}
 @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
 </style>
